@@ -46,7 +46,12 @@ using namespace pybind11::literals; // to bring in the `_a` literal
 NGP_NAMESPACE_BEGIN
 
 
-void Testbed::Nerf::Training::set_image(int frame_idx, pybind11::array_t<float> img, pybind11::array_t<float> depth_img, float depth_scale) {
+//void Testbed::Nerf::Training::set_image(int frame_idx, pybind11::array_t<float> img, pybind11::array_t<float> depth_img, float depth_scale) {
+
+template <typename T>
+using py_array_c = Testbed::Nerf::Training::py_array_c<T>;
+void Testbed::Nerf::Training::set_image(int frame_idx, py_array_c<float> img, py_array_c<float> depth_img, float depth_scale) {
+//void Testbed::Nerf::Training::set_image(int frame_idx, pybind11::array_t<float, py::array::c_style | py::array::forcecast > img, pybind11::array_t<float, py::array::c_style | py::array::forcecast> depth_img, float depth_scale) {
 	if (frame_idx < 0 || frame_idx >= dataset.n_images) {
 		throw std::runtime_error{"Invalid frame index"};
 	}
@@ -215,6 +220,22 @@ py::array_t<float> Testbed::screenshot(bool linear) const {
 }
 #endif
 
+pybind11::array_t<float> Testbed::get_density_on_grid_to_cpu(Eigen::Vector3i res3d, BoundingBox aabb)
+{
+	Matrix3f render_aabb_to_local = Matrix3f::Identity();
+	if (aabb.is_empty()) {
+		aabb = m_testbed_mode == ETestbedMode::Nerf ? m_render_aabb : m_aabb;
+		render_aabb_to_local = m_render_aabb_to_local;
+	}
+	GPUMemory<float> density = (m_render_ground_truth && m_testbed_mode == ETestbedMode::Sdf) ? get_sdf_gt_on_grid(res3d, aabb, render_aabb_to_local) : get_density_on_grid(res3d, aabb, render_aabb_to_local);
+
+	py::array_t<float> result({ (int)density.size() });
+	py::buffer_info buf = result.request();
+
+	density.copy_to_host((float*)buf.ptr);
+	return result;
+}
+
 PYBIND11_MODULE(pyngp, m) {
 	m.doc() = "Instant neural graphics primitives";
 
@@ -363,6 +384,10 @@ PYBIND11_MODULE(pyngp, m) {
 			py::arg("spp") = 1,
 			py::arg("linear") = true
 		)
+		.def("get_density_on_grid", &Testbed::get_density_on_grid_to_cpu, "Get flattened density grid",
+			py::arg("res3d") = Eigen::Vector3i::Constant(128),
+			py::arg("aabb") = BoundingBox()
+		)
 		.def("destroy_window", &Testbed::destroy_window, "Destroy the window again.")
 		.def("train", &Testbed::train, py::call_guard<py::gil_scoped_release>(), "Perform a specified number of training steps.")
 		.def("reset", &Testbed::reset_network, py::arg("reset_density_grid") = true, "Reset training.")
@@ -441,6 +466,7 @@ PYBIND11_MODULE(pyngp, m) {
 		.def_readwrite("fov_axis", &Testbed::m_fov_axis)
 		.def_readwrite("zoom", &Testbed::m_zoom)
 		.def_readwrite("screen_center", &Testbed::m_screen_center)
+		.def("load_logo", &Testbed::load_logo)
 		.def("set_nerf_camera_matrix", &Testbed::set_nerf_camera_matrix)
 		.def("set_camera_to_training_view", &Testbed::set_camera_to_training_view)
 		.def("first_training_view", &Testbed::first_training_view)

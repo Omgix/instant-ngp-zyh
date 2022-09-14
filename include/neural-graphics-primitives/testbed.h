@@ -293,6 +293,7 @@ public:
 	void load_nerf();
 	void load_nerf_post();
 	void load_mesh();
+	void load_logo(const std::string& logo_path);
 	void set_exposure(float exposure) { m_exposure = exposure; }
 	void set_max_level(float maxlevel);
 	void set_min_level(float minlevel);
@@ -355,6 +356,7 @@ public:
 	pybind11::array_t<float> render_to_cpu(int width, int height, int spp, bool linear, float start_t, float end_t, float fps, float shutter_fraction);
 	pybind11::array_t<float> render_with_rolling_shutter_to_cpu(const Eigen::Matrix<float, 3, 4>& camera_transform_start, const Eigen::Matrix<float, 3, 4>& camera_transform_end, const Eigen::Vector4f& rolling_shutter, int width, int height, int spp, bool linear);
 	pybind11::array_t<float> screenshot(bool linear) const;
+	pybind11::array_t<float> get_density_on_grid_to_cpu(Eigen::Vector3i res3d = Eigen::Vector3i::Constant(128), BoundingBox aabb = BoundingBox());
 	void override_sdf_training_data(pybind11::array_t<float> points, pybind11::array_t<float> distances);
 #endif
 
@@ -609,7 +611,11 @@ public:
 			void update_transforms(int first = 0, int last = -1);
 
 #ifdef NGP_PYTHON
-			void set_image(int frame_idx, pybind11::array_t<float> img, pybind11::array_t<float> depth_img, float depth_scale);
+
+			template <typename T>
+			using py_array_c = pybind11::array_t<T, pybind11::array::c_style | pybind11::array::forcecast>;
+			//void set_image(int frame_idx, pybind11::array_t<float> img, pybind11::array_t<float> depth_img, float depth_scale);
+			void set_image(int frame_idx, py_array_c<float> img, py_array_c<float> depth_img, float depth_scale);
 #endif
 
 			void reset_camera_extrinsics();
@@ -833,6 +839,11 @@ public:
 	filesystem::path m_network_config_path;
 
 	nlohmann::json m_network_config;
+
+	filesystem::path m_logo_path;
+	GLuint m_logo_texture;
+	int m_logo_width;
+	int m_logo_height;
 
 	default_rng_t m_rng;
 

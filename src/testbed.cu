@@ -1459,6 +1459,19 @@ bool Testbed::begin_frame_and_handle_user_input() {
 	mouse_wheel({m.x / (float)m_window_res.y(), m.y / (float)m_window_res.y()}, mw);
 	mouse_drag({relm.x, relm.y}, mb);
 
+	if (glIsTexture(m_logo_texture)) {
+		if (ImGui::Begin("logo", 0, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground)) {
+			float height = ImGui::GetWindowHeight();
+			float width = ImGui::GetWindowWidth();
+			float frac1 = (height - 10.0f) / m_logo_height;
+			float frac2 = (width - 10.0f) / m_logo_width;
+			float frac = std::min(frac1, frac2);
+			ImGui::Image((void*)(intptr_t)m_logo_texture, ImVec2(int(m_logo_width * frac), int(m_logo_height * frac)),
+				ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f));
+			ImGui::End();
+		}
+	}
+
 	if (m_imgui_enabled) {
 		imgui();
 	}
@@ -1815,14 +1828,15 @@ void Testbed::init_window(int resw, int resh, bool hidden, bool second_window) {
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 	glfwWindowHint(GLFW_VISIBLE, hidden ? GLFW_FALSE : GLFW_TRUE);
-	std::string title = "Neural graphics primitives (";
-	switch (m_testbed_mode) {
-		case ETestbedMode::Image: title += "Image"; break;
-		case ETestbedMode::Sdf: title += "SDF"; break;
-		case ETestbedMode::Nerf: title += "NeRF"; break;
-		case ETestbedMode::Volume: title += "Volume"; break;
-	}
-	title += ")";
+	std::string title = "";
+	//std::string title = "Neural graphics primitives (";
+	//switch (m_testbed_mode) {
+	//	case ETestbedMode::Image: title += "Image"; break;
+	//	case ETestbedMode::Sdf: title += "SDF"; break;
+	//	case ETestbedMode::Nerf: title += "NeRF"; break;
+	//	case ETestbedMode::Volume: title += "Volume"; break;
+	//}
+	//title += ")";
 	m_glfw_window = glfwCreateWindow(m_window_res.x(), m_window_res.y(), title.c_str(), NULL, NULL);
 	if (m_glfw_window == NULL) {
 		throw std::runtime_error{"GLFW window could not be created."};
@@ -2386,6 +2400,31 @@ void Testbed::reset_network(bool clear_density_grid) {
 	}
 }
 
+void Testbed::load_logo(const std::string& logo_path) {
+	m_logo_path = logo_path;
+
+	unsigned char* image_data = stbi_load(m_logo_path.str().c_str(), &m_logo_width, &m_logo_height, NULL, 4);
+	if (image_data != NULL)
+	{
+		// Create a OpenGL texture identifier
+		glGenTextures(1, &m_logo_texture);
+		glBindTexture(GL_TEXTURE_2D, m_logo_texture);
+
+		// Setup filtering parameters for display
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); // This is required on WebGL for non power-of-two textures
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); // Same
+
+		// Upload pixels into texture
+#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_logo_width, m_logo_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+		stbi_image_free(image_data);
+	}
+}
+
 Testbed::Testbed(ETestbedMode mode)
 : m_testbed_mode(mode)
 {
@@ -2439,6 +2478,8 @@ Testbed::~Testbed() {
 	if (m_render_window) {
 		destroy_window();
 	}
+
+	glDeleteTextures(1, &m_logo_texture);
 }
 
 void Testbed::train(uint32_t batch_size) {
