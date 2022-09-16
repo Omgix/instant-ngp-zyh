@@ -444,7 +444,7 @@ inline __device__ int mip_from_pos(const Vector3f& pos, uint32_t max_cascade = N
 	int exponent;
 	float maxval = (pos - Vector3f::Constant(0.5f)).cwiseAbs().maxCoeff();
 	frexpf(maxval, &exponent);
-	return min(max_cascade-1, max(0, exponent+1));
+	return min(max_cascade, max(0, exponent+1));
 }
 
 inline __device__ int mip_from_dt(float dt, const Vector3f& pos, uint32_t max_cascade = NERF_CASCADES()-1) {
@@ -453,7 +453,7 @@ inline __device__ int mip_from_dt(float dt, const Vector3f& pos, uint32_t max_ca
 	if (dt<1.f) return mip;
 	int exponent;
 	frexpf(dt, &exponent);
-	return min(max_cascade-1, max(exponent, mip));
+	return min(max_cascade, max(exponent, mip));
 }
 
 __global__ void generate_grid_samples_nerf_nonuniform(const uint32_t n_elements, default_rng_t rng, const uint32_t step, BoundingBox aabb, const float* __restrict__ grid_in, NerfPosition* __restrict__ out, uint32_t* __restrict__ indices, uint32_t n_cascades, float thresh) {
@@ -572,7 +572,7 @@ __global__ void grid_to_bitfield(
 
 	float thresh = std::min(NERF_MIN_OPTICAL_THICKNESS(), *mean_density_ptr);
 
-	#pragma unroll
+	NGP_PRAGMA_UNROLL
 	for (uint8_t j = 0; j < 8; ++j) {
 		bits |= grid[i*8+j] > thresh ? ((uint8_t)1 << j) : 0;
 	}
@@ -589,7 +589,7 @@ __global__ void bitfield_max_pool(const uint32_t n_elements,
 
 	uint8_t bits = 0;
 
-	#pragma unroll
+	NGP_PRAGMA_UNROLL
 	for (uint8_t j = 0; j < 8; ++j) {
 		// If any bit is set in the previous level, set this
 		// level's bit. (Max pooling.)
@@ -1035,8 +1035,8 @@ inline __device__ Vector2f nerf_random_image_pos_training(default_rng_t& rng, co
 
 inline __device__ uint32_t image_idx(uint32_t base_idx, uint32_t n_rays, uint32_t n_rays_total, uint32_t n_training_images, const float* __restrict__ cdf = nullptr, float* __restrict__ pdf = nullptr) {
 	if (cdf) {
-		float sample = ld_random_val(base_idx + n_rays_total, 0xdeadbeef);
-		// float sample = random_val(base_idx + n_rays_total);
+		float sample = ld_random_val(base_idx/* + n_rays_total*/, 0xdeadbeef);
+		// float sample = random_val(base_idx/* + n_rays_total*/);
 		uint32_t img = binary_search(sample, cdf, n_training_images);
 
 		if (pdf) {
@@ -1047,13 +1047,13 @@ inline __device__ uint32_t image_idx(uint32_t base_idx, uint32_t n_rays, uint32_
 		return img;
 	}
 
-	// return ((base_idx + n_rays_total) * 56924617 + 96925573) % n_training_images;
+	// return ((base_idx/* + n_rays_total*/) * 56924617 + 96925573) % n_training_images;
 
 	// Neighboring threads in the warp process the same image. Increases locality.
 	if (pdf) {
 		*pdf = 1.0f;
 	}
-	return (((base_idx + n_rays_total) * n_training_images) / n_rays) % n_training_images;
+	return (((base_idx/* + n_rays_total*/) * n_training_images) / n_rays) % n_training_images;
 }
 
 __global__ void generate_training_samples_nerf(
@@ -1422,7 +1422,7 @@ __global__ void compute_loss_kernel_train_nerf(
 
 	float target_depth = rays_in_unnormalized[i].d.norm() * ((depth_supervision_lambda > 0.0f && metadata[img].depth) ? read_depth(xy, resolution, metadata[img].depth) : -1.0f);
 	LossAndGradient lg_depth = loss_and_gradient(Array3f::Constant(target_depth), Array3f::Constant(depth_ray), depth_loss_type);
-	float depth_loss_gradient = target_depth > 0.0f ? lg_depth.gradient.x() : 0;
+	float depth_loss_gradient = target_depth > 0.0f ? depth_supervision_lambda * lg_depth.gradient.x() : 0;
 
 	// Note: dividing the gradient by the PDF would cause unbiased loss estimates.
 	// Essentially: variance reduction, but otherwise the same optimization.
@@ -1638,20 +1638,20 @@ __global__ void compute_cam_gradient_train_nerf(
 		ray_gradient.d += pos_gradient * t + dir_gradient;
 	}
 
-	// Projection of the raydir gradient onto the plane normal to raydir,
-	// because that's the only degree of motion that the raydir has.
-	ray_gradient.d -= ray.d * ray_gradient.d.dot(ray.d);
-
 	rng.advance(ray_idx * N_MAX_RANDOM_SAMPLES_PER_RAY());
 	float xy_pdf = 1.0f;
 
 	Vector2f xy = nerf_random_image_pos_training(rng, resolution, snap_to_pixel_centers, cdf_x_cond_y, cdf_y, error_map_res, img, &xy_pdf);
 
 	if (distortion_gradient) {
+		// Projection of the raydir gradient onto the plane normal to raydir,
+		// because that's the only degree of motion that the raydir has.
+		Vector3f orthogonal_ray_gradient = ray_gradient.d - ray.d * ray_gradient.d.dot(ray.d);
+
 		// Rotate ray gradient to obtain image plane gradient.
 		// This has the effect of projecting the (already projected) ray gradient from the
 		// tangent plane of the sphere onto the image plane (which is correct!).
-		Vector3f image_plane_gradient = xform.block<3,3>(0,0).inverse() * ray_gradient.d;
+		Vector3f image_plane_gradient = xform.block<3,3>(0,0).inverse() * orthogonal_ray_gradient;
 
 		// Splat the resulting 2D image plane gradient into the distortion params
 		deposit_image_gradient<2>(image_plane_gradient.head<2>() / xy_pdf, distortion_gradient, distortion_gradient_weight, distortion_resolution, xy);
@@ -1659,7 +1659,7 @@ __global__ void compute_cam_gradient_train_nerf(
 
 	if (cam_pos_gradient) {
 		// Atomically reduce the ray gradient into the xform gradient
-		#pragma unroll
+		NGP_PRAGMA_UNROLL
 		for (uint32_t j = 0; j < 3; ++j) {
 			atomicAdd(&cam_pos_gradient[img][j], ray_gradient.o[j] / xy_pdf);
 		}
@@ -1673,7 +1673,7 @@ __global__ void compute_cam_gradient_train_nerf(
 		Vector3f angle_axis = ray.d.cross(ray_gradient.d);
 
 		// Atomically reduce the ray gradient into the xform gradient
-		#pragma unroll
+		NGP_PRAGMA_UNROLL
 		for (uint32_t j = 0; j < 3; ++j) {
 			atomicAdd(&cam_rot_gradient[img][j], angle_axis[j] / xy_pdf);
 		}
@@ -1800,7 +1800,8 @@ __global__ void init_rays_with_payload_kernel_nerf(
 	float* __restrict__ depthbuffer,
 	const float* __restrict__ distortion_data,
 	const Vector2i distortion_resolution,
-	ERenderMode render_mode
+	ERenderMode render_mode,
+	Vector2i quilting_dims
 ) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
@@ -1815,6 +1816,9 @@ __global__ void init_rays_with_payload_kernel_nerf(
 		aperture_size = 0.0;
 	}
 
+	if (quilting_dims != Vector2i::Ones()) {
+		apply_quilting(&x, &y, resolution, parallax_shift, quilting_dims);
+	}
 
 	// TODO: pixel_to_ray also immediately computes u,v for the pixel, so this is somewhat redundant
 	float u = (x + 0.5f) * (1.f / resolution.x());
@@ -1823,7 +1827,7 @@ __global__ void init_rays_with_payload_kernel_nerf(
 	Ray ray = pixel_to_ray(
 		sample_index,
 		{x, y},
-		resolution,
+		resolution.cwiseQuotient(quilting_dims),
 		focal_length,
 		camera_matrix0 * ray_time + camera_matrix1 * (1.f - ray_time),
 		screen_center,
@@ -1962,8 +1966,9 @@ void Testbed::NerfTracer::init_rays_from_camera(
 	const Matrix<float, 3, 4>& camera_matrix0,
 	const Matrix<float, 3, 4>& camera_matrix1,
 	const Vector4f& rolling_shutter,
-	Vector2f screen_center,
-	Vector3f parallax_shift,
+	const Vector2f& screen_center,
+	const Vector3f& parallax_shift,
+	const Vector2i& quilting_dims,
 	bool snap_to_pixel_centers,
 	const BoundingBox& render_aabb,
 	const Matrix3f& render_aabb_to_local,
@@ -2010,7 +2015,8 @@ void Testbed::NerfTracer::init_rays_from_camera(
 		depth_buffer,
 		distortion_data,
 		distortion_resolution,
-		render_mode
+		render_mode,
+		quilting_dims
 	);
 
 	m_n_rays_initialized = resolution.x() * resolution.y();
@@ -2256,7 +2262,8 @@ void Testbed::render_nerf(CudaRenderBuffer& render_buffer, const Vector2i& max_r
 		camera_matrix1,
 		rolling_shutter,
 		screen_center,
-		get_scaled_parallax_shift(),
+		m_parallax_shift,
+		m_quilting_dims,
 		m_snap_to_pixel_centers,
 		m_render_aabb,
 		m_render_aabb_to_local,
@@ -2669,7 +2676,7 @@ void Testbed::update_density_grid_nerf(float decay, uint32_t n_uniform_density_g
 
 		linear_kernel(generate_grid_samples_nerf_nonuniform, 0, stream,
 			n_uniform_density_grid_samples,
-			m_rng,
+			m_nerf.training.density_grid_rng,
 			m_nerf.density_grid_ema_step,
 			m_aabb,
 			m_nerf.density_grid.data(),
@@ -2678,11 +2685,11 @@ void Testbed::update_density_grid_nerf(float decay, uint32_t n_uniform_density_g
 			m_nerf.max_cascade+1,
 			-0.01f
 		);
-		m_rng.advance();
+		m_nerf.training.density_grid_rng.advance();
 
 		linear_kernel(generate_grid_samples_nerf_nonuniform, 0, stream,
 			n_nonuniform_density_grid_samples,
-			m_rng,
+			m_nerf.training.density_grid_rng,
 			m_nerf.density_grid_ema_step,
 			m_aabb,
 			m_nerf.density_grid.data(),
@@ -2691,7 +2698,7 @@ void Testbed::update_density_grid_nerf(float decay, uint32_t n_uniform_density_g
 			m_nerf.max_cascade+1,
 			NERF_MIN_OPTICAL_THICKNESS()
 		);
-		m_rng.advance();
+		m_nerf.training.density_grid_rng.advance();
 
 		GPUMatrix<network_precision_t, RM> density_matrix(mlp_out, padded_output_width, n_density_grid_samples);
 		GPUMatrix<float> density_grid_position_matrix((float*)density_grid_positions, sizeof(NerfPosition)/sizeof(float), n_density_grid_samples);
@@ -3392,7 +3399,7 @@ GPUMemory<float> Testbed::get_density_on_grid(Vector3i res3d, const BoundingBox&
 			m_nerf.density_activation,
 			positions + offset,
 			nerf_mode ? m_nerf.density_grid.data() : nullptr,
-			m_nerf.max_cascade + 1
+			m_nerf.max_cascade
 		);
 	}
 
